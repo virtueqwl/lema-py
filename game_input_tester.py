@@ -121,42 +121,8 @@ def focus_window(hwnd: int) -> bool:
     return bool(user32.SetForegroundWindow(hwnd))
 
 # ===== 全局热键 =====
-HOTKEY_VK = {1: 0x73, 2: 0x74, 3: 0x75, 4: 0x76}  # F4~F7
-
-def register_hotkeys(callbacks: dict, stop_event: threading.Event):
-    """注册全局热键（F4-F7），阻塞直到 stop_event 置位。"""
-    callbacks_id = {hid: c for hid, c in callbacks.items()}
-
-    @ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int)
-    def wndproc(hwnd, msg, wparam, lparam):
-        if msg == 0x0312:  # WM_HOTKEY
-            cb = callbacks_id.get(wparam)
-            if cb:
-                threading.Thread(target=cb, daemon=True).start()
-        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-
-    wc = user32.WNDCLASSW()
-    wc.lpfnWndProc = wndproc
-    wc.hInstance = kernel32.GetModuleHandleW(None)
-    wc.lpszClassName = "GameInputTesterHotkeyClass"
-    user32.RegisterClassW(ctypes.byref(wc))
-    hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "", 0, 0, 0, 0, 0, None, None, wc.hInstance, None)
-
-    for hid in callbacks:
-        if not user32.RegisterHotKey(hwnd, hid, 0, HOTKEY_VK[hid]):
-            print(f"RegisterHotKey {hid} 失败")
-
-    msg = ctypes.wintypes.MSG()
-    while not stop_event.is_set():
-        if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-        else:
-            time.sleep(0.05)
-
-    for hid in callbacks:
-        user32.UnregisterHotKey(hwnd, hid)
-    user32.DestroyWindow(hwnd)
+# 注：F4-F7 热键现在通过 Recorder 钩子识别（见 HOTKEY_VK_TO_ACTION），
+# 不再用 RegisterHotKey（焦点问题）。register_hotkeys 函数已删除。
 
 # ===== 应用根目录 =====
 # 开发期：脚本所在目录
@@ -174,9 +140,9 @@ VK_TO_NAME = {
     # 字母
     **{i: chr(i).lower() for i in range(ord('A'), ord('Z') + 1)},
     # 数字
-    **{i: chr(i - ord('0') + ord('0')) for i in range(0x30, 0x3A)},  # VK_0..VK_9
+    **{i: chr(i - ord('0') + ord('0')) for i in range(0x30, 0x3A)},
     # 功能键
-    **{0x70 + i: f'f{i+1}' for i in range(12)},  # VK_F1..F12
+    **{0x70 + i: f'f{i+1}' for i in range(12)},
     # 方向 / 编辑
     0x25: 'left', 0x26: 'up', 0x27: 'right', 0x28: 'down',
     0x24: 'home', 0x23: 'end', 0x2D: 'insert', 0x2E: 'delete',
@@ -190,9 +156,17 @@ VK_TO_NAME = {
     # 小键盘
     **{0x60 + i: f'numpad{i}' for i in range(10)},
     0x6A: 'multiply', 0x6B: 'add', 0x6D: 'subtract', 0x6E: 'decimal', 0x6F: 'divide',
-    # 符号（VK 不与 ASCII 重叠时单独映射）
+    # 符号
     0xC0: '`', 0xBD: '-', 0xBB: '=', 0xDB: '[', 0xDD: ']', 0xDC: '\\',
     0xBA: ';', 0xDE: "'", 0xBC: ',', 0xBE: '.', 0xBF: '/',
+}
+
+# 全局热键 VK → 逻辑动作（被 Recorder 钩子识别）
+HOTKEY_VK_TO_ACTION = {
+    0x73: 'F4',  # 键位映射
+    0x74: 'F5',  # 录制切换
+    0x75: 'F6',  # 启动回放
+    0x76: 'F7',  # 停止回放
 }
 
 class Recorder:
@@ -212,6 +186,7 @@ class Recorder:
 
     def __init__(self, on_event):
         self._on_event = on_event
+        self._on_hotkey = None  # 形如 lambda hwnd, action: ...（钩子触发时调）
         self._hook_id = None
         self._thread = None
         self._hwnd = None
@@ -221,6 +196,10 @@ class Recorder:
         self._start_ms = 0
         self._watch_keys = set()  # 空 = 录所有
         self._logical_name_of = lambda k: k
+
+    def set_hotkey_callback(self, cb):
+        """设置热键回调：cb(hwnd, action) — 钩子线程里同步调。"""
+        self._on_hotkey = cb
 
     def set_filter(self, watch_keys: set, logical_name_of):
         self._watch_keys = set(watch_keys) if watch_keys else set()
@@ -282,9 +261,22 @@ class Recorder:
                 try:
                     info = ctypes.cast(lParam, ctypes.POINTER(self.KBDLLHOOKSTRUCT))[0]
                     vk = info.vkCode
+                    is_down = (info.flags & self.LLKHF_UP) == 0
+
+                    # F4-F7 热键：钩子触发时焦点还没切走，GetForegroundWindow
+                    # 拿到的就是真正的"按下热键时的前台窗口"（记事本/游戏）
+                    if is_down and self._on_hotkey and vk in HOTKEY_VK_TO_ACTION:
+                        try:
+                            hwnd = user32.GetForegroundWindow()
+                            self._on_hotkey(hwnd, HOTKEY_VK_TO_ACTION[vk])
+                        except Exception:
+                            pass
+                        # 不返回 False：让事件继续传给原目标窗口（让游戏能收到 F4-F7）
+                        return user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
+
+                    # 录制事件
                     key_name = VK_TO_NAME.get(vk, f'vk{vk:02x}')
                     if not self._watch_keys or key_name in self._watch_keys:
-                        is_down = (info.flags & self.LLKHF_UP) == 0
                         try:
                             logical = self._logical_name_of(key_name) or key_name
                             self._on_event(logical, key_name, is_down,
@@ -808,22 +800,15 @@ class App:
         self._player = None
         self._player_thread = None
         self._recorder = Recorder(on_event=self._on_recorded)
+        self._recorder.set_hotkey_callback(self._on_hotkey)
         self._update_recorder_filter()
-        self.hotkey_stop = threading.Event()
+        # 钩子**启动后就一直跑**（同时承担"录制"和"全局热键"两个职责）
+        self._recorder.start()
 
         self._build_ui()
         self._load_config_list()
         self._restore_last_config()
         self._update_status_bar()
-
-        # 全局热键
-        hotkey_cb = {
-            1: self.open_mapping_editor,
-            2: self.toggle_record,
-            3: self.start_play,
-            4: self.stop_play,
-        }
-        threading.Thread(target=register_hotkeys, args=(hotkey_cb, self.hotkey_stop), daemon=True).start()
 
     def _build_ui(self):
         # 顶栏：模式 + 轮数 + 重置开关
@@ -974,6 +959,31 @@ class App:
                 self._buffer.append((logical, physical))
         self.log(f"[{ts_ms:6}ms] {logical} {evt_str}")
 
+    def _on_hotkey(self, hwnd: int, action: str):
+        """全局热键回调（钩子线程，焦点**还在上一个前台窗口**时调）。
+        hwnd 是按下 F4-F7 时真正的 GetForegroundWindow()。
+        """
+        # 钩子线程不能直接调 tkinter —— 用 after(0, ...) 派发到 UI 线程
+        # 但 hwnd 必须先存好（_saved_hwnd）
+        if action == 'F6':
+            # 关键：钩子触发时 hwnd 是真正的"按下 F6 时的前台窗口"
+            # 此时焦点还没切到主窗口，所以这个值是对的
+            self._saved_hwnd = hwnd
+            try:
+                title = get_hwnd_title(hwnd) or f"HWND={hwnd}"
+                self.log(f"💡 F6 按下，前台窗口: {title}")
+            except Exception:
+                self.log(f"💡 F6 按下，HWND={hwnd}")
+        # 派发真正的回调到 UI 线程
+        cb = {
+            'F4': self.open_mapping_editor,
+            'F5': self.toggle_record,
+            'F6': self.start_play,
+            'F7': self.stop_play,
+        }.get(action)
+        if cb:
+            self.root.after(0, cb)
+
     # ===== 录制 / 回放 =====
     def toggle_record(self):
         if self._recorder._thread is not None:
@@ -998,24 +1008,22 @@ class App:
             self.log("⚠ 已有回放在跑")
             return
 
-        # 关键：保存当前前台窗口的 HWND，强制把焦点转回去
-        # （iconify 不够稳，用 SetForegroundWindow + alt hack 强制转移）
-        self._saved_hwnd = get_foreground_hwnd()
-        if self._saved_hwnd and self._saved_hwnd != int(self.root.winfo_id()):
-            try:
-                title = get_hwnd_title(self._saved_hwnd) or f"HWND={self._saved_hwnd}"
-                self.log(f"💡 记录前台窗口: {title}")
-            except Exception:
-                self.log(f"💡 记录前台窗口 HWND={self._saved_hwnd}")
-        else:
-            self._saved_hwnd = 0
-            self.log("⚠ 未检测到前台窗口（焦点可能在主窗口）")
+        # 关键：_saved_hwnd 已经在 F6 按下时由钩子记录了（焦点还在前台窗口时）
+        # 钩子触发早于焦点切换，所以这个值是真正的"前台窗口 HWND"
+        if not self._saved_hwnd:
+            self.log("⚠ 未记录前台窗口（请先切到记事本/游戏再按 F6）")
+            return
+        try:
+            title = get_hwnd_title(self._saved_hwnd) or f"HWND={self._saved_hwnd}"
+            self.log(f"💡 目标窗口: {title}")
+        except Exception:
+            self.log(f"💡 目标 HWND={self._saved_hwnd}")
+
         # 主窗口退缩到最小化（不退出，托盘图标可见可恢复）
         try:
             self.root.iconify()
         except Exception:
             pass
-        time.sleep(0.3)  # 给 Windows 转移焦点的时间
 
         # 启动前等旧 task
         rounds = self.rounds_var.get()
@@ -1252,7 +1260,6 @@ class App:
         try:
             self._player and self._player.cancel.set()
             self._recorder.stop()
-            self.hotkey_stop.set()
             if self._player_thread:
                 self._player_thread.join(timeout=1.0)
         finally:

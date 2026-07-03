@@ -34,10 +34,12 @@ jobs:
         python -c "
         src = open('game_input_tester.py', encoding='utf-8').read()
         for api in ['SCANCODE', 'send_scan_code', 'CooldownPlayer', 'ScriptPlayer',
-                    'register_hotkeys', 'Recorder', 'MappingDialog', 'EditConfigDialog',
+                    'Recorder', 'MappingDialog', 'EditConfigDialog',
                     'execute_min', 'execute_max', 'round_timeout_sec', '_weighted_pick',
-                    'class App', '_app_dir', 'import sys']:
+                    'class App', '_app_dir', 'import sys', '_on_hotkey', 'HOTKEY_VK_TO_ACTION']:
             assert api in src, f'Missing: {api}'
+        # 旧的 register_hotkeys 已删除（钩子替代）
+        assert 'def register_hotkeys' not in src, 'register_hotkeys 应已删除'
         print('All key APIs present')
         "
 
