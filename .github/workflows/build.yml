@@ -1,0 +1,41 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-syntax:
+    name: Syntax check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Python syntax check
+      run: python3 -m py_compile game_input_tester.py
+
+  smoke-test:
+    name: Smoke test (Windows)
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Smoke import
+      run: python -c "import ast; ast.parse(open('game_input_tester.py').read()); print('OK')"
+    - name: Verify SCANCODE coverage
+      run: |
+        python -c "
+        import ast
+        tree = ast.parse(open('game_input_tester.py').read())
+        # 简单 sanity check: 文件包含 SCANCODE 字典
+        src = open('game_input_tester.py').read()
+        assert 'SCANCODE' in src
+        assert 'send_scan_code' in src
+        assert 'CooldownPlayer' in src
+        assert 'register_hotkeys' in src
+        print('All key APIs present')
+        "

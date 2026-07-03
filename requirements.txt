@@ -1,0 +1,3 @@
+# GameInputTester Python 版只用 Python 标准库，零第三方依赖。
+# 运行：Windows 上需要 ctypes（标准库自带）
+# 打包：pip install pyinstaller

@@ -1,0 +1,7 @@
+[
+  {"logical": "Basic",  "physical": "q",     "cooldown_ms": 3000,  "jitter_ms": 300,  "after_min_ms": 800,  "after_max_ms": 1500, "weight": 5},
+  {"logical": "Skill1", "physical": "w",     "cooldown_ms": 5000,  "jitter_ms": 500,  "after_min_ms": 1000, "after_max_ms": 2000, "weight": 3},
+  {"logical": "Skill2", "physical": "e",     "cooldown_ms": 8000,  "jitter_ms": 1000, "after_min_ms": 1200, "after_max_ms": 2000, "weight": 2},
+  {"logical": "Ult",    "physical": "r",     "cooldown_ms": 15000, "jitter_ms": 1500, "after_min_ms": 1000, "after_max_ms": 1800, "weight": 1},
+  {"logical": "Dodge",  "physical": "space", "cooldown_ms": 1000,  "jitter_ms": 200,  "after_min_ms": 500,  "after_max_ms": 1000, "weight": 4}
+]
