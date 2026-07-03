@@ -340,7 +340,7 @@ class CooldownPlayer:
 
     def __init__(self, slots, rounds=1, reset_per_round=False,
                  execute_min=3, execute_max=6, round_timeout_sec=0,
-                 on_progress=None):
+                 on_progress=None, app=None):
         self.slots = slots
         self.rounds = rounds
         self.reset_per_round = reset_per_round
@@ -348,6 +348,7 @@ class CooldownPlayer:
         self.execute_max = max(self.execute_min, int(execute_max))
         self.round_timeout_sec = max(0, int(round_timeout_sec))
         self.on_progress = on_progress
+        self.app = app
         self.cancel = threading.Event()
 
     def _group_of(self, s):
@@ -372,12 +373,8 @@ class CooldownPlayer:
     def run(self):
         rng = random.Random()
         last_trigger = {s['physical']: 0 for s in self.slots}
-
-        # 强制恢复焦点：发键前先 setforegroundwindow 到保存的窗口
-        hwnd = getattr(self, '_saved_hwnd', 0)
-        if hwnd:
-            focus_window(hwnd)
-            time.sleep(0.1)
+        # 实时拿当前前台窗口的 HWND（用于判断焦点是否在主窗口/无效）
+        hwnd_my = int(self.app.root.winfo_id()) if hasattr(self, 'app') else 0
 
         # 按 group 分桶
         buckets = {g: [s for s in self.slots if self._group_of(s) == g and int(s.get('weight', 1)) > 0]
@@ -465,7 +462,16 @@ class CooldownPlayer:
                     if self.cancel.wait(delay / 1000.0):
                         return
 
-                # 发键
+                # 实时检测前台窗口：如果是主窗口 / 无效 → 跳过（避免回环）
+                cur_hwnd = user32.GetForegroundWindow()
+                if cur_hwnd == 0 or cur_hwnd == hwnd_my:
+                    self.on_progress and self.on_progress(
+                        f"轮 {round_n} 跳过：前台在主窗口或无效"
+                    )
+                    self.cancel.wait(0.3)
+                    continue
+
+                # 发键（SendInput 自动发给当前前台窗口 cur_hwnd）
                 send_key(pick['physical'])
                 last_trigger[pick['physical']] = int(time.time() * 1000)
                 group = self._group_of(pick)
@@ -497,24 +503,27 @@ class CooldownPlayer:
 
 # ===== 脚本回放（按录制顺序） =====
 class ScriptPlayer:
-    def __init__(self, steps, loop=False, on_progress=None):
-        self.steps = steps  # [(logical, physical, wait_min, wait_max), ...]
+    def __init__(self, steps, loop=False, on_progress=None, app=None):
+        self.steps = steps
         self.loop = loop
         self.on_progress = on_progress
+        self.app = app
         self.cancel = threading.Event()
 
     def run(self):
         rng = random.Random()
-        # 强制恢复焦点
-        hwnd = getattr(self, '_saved_hwnd', 0)
-        if hwnd:
-            focus_window(hwnd)
-            time.sleep(0.1)
+        hwnd_my = int(self.app.root.winfo_id()) if hasattr(self, 'app') else 0
         while not self.cancel.is_set():
             for s in self.steps:
                 if self.cancel.is_set():
                     return
                 _, physical, mn, mx = s
+                # 实时检测前台窗口
+                cur_hwnd = user32.GetForegroundWindow()
+                if cur_hwnd == 0 or cur_hwnd == hwnd_my:
+                    self.on_progress and self.on_progress("script 跳过：前台不在")
+                    self.cancel.wait(0.3)
+                    continue
                 send_key(physical)
                 if self.on_progress:
                     self.on_progress(f"script | {s[0]} ({physical})")
@@ -1039,7 +1048,7 @@ class App:
                 self.mapping, rounds, self.reset_var.get(),
                 execute_min=self.execute_min, execute_max=self.execute_max,
                 round_timeout_sec=self.round_timeout_sec,
-                on_progress=self.log)
+                on_progress=self.log, app=self)
             mode = "每轮重置" if self.reset_var.get() else "跨轮累计"
             tmo = f"{self.round_timeout_sec}s" if self.round_timeout_sec > 0 else "无"
             self.log(f"▶ COOLDOWN | {len(self.mapping)} 键 | {'∞' if rounds == 0 else rounds} 轮 | {mode} | "
@@ -1055,7 +1064,7 @@ class App:
             if not steps:
                 self.log("⚠ 没有可回放的动作（先录制）")
                 return
-            self._player = ScriptPlayer(steps, loop=False, on_progress=self.log)
+            self._player = ScriptPlayer(steps, loop=False, on_progress=self.log, app=self)
             self.log(f"▶ SCRIPT | {len(steps)} steps")
         self._player_thread = threading.Thread(target=self._player.run, daemon=True)
         self._player_thread.start()
