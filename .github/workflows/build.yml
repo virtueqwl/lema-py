@@ -54,11 +54,12 @@ jobs:
       run: pip install pyinstaller
 
     - name: Build single-file EXE
-      run: |
-        pyinstaller --onefile --windowed --name GameInputTester ^
-          --add-data "samples;samples" ^
-          --collect-all tkinter ^
-          game_input_tester.py
+      shell: pwsh
+      run: >
+        pyinstaller --onefile --windowed --name GameInputTester
+        --add-data "samples;samples"
+        --collect-all tkinter
+        game_input_tester.py
 
     - name: List build output
       run: dir dist
