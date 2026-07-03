@@ -959,6 +959,11 @@ class App:
         if self._player_thread and self._player_thread.is_alive():
             self.log("⚠ 已有回放在跑")
             return
+        # 关键：最小化主窗口，让前台窗口（游戏/记事本）拿到焦点
+        # SendInput 只会发给前台窗口 — 不最小化会发给 GameInputTester 自己
+        self.log("💡 主窗口最小化，焦点转回前台窗口...")
+        self.root.iconify()
+        time.sleep(0.2)  # 给 Windows 一点时间转移焦点
         # 启动前等旧 task
         rounds = self.rounds_var.get()
         if self.mode_combo.current() == 0:
@@ -998,6 +1003,11 @@ class App:
         if self._player:
             self._player.cancel.set()
             self.log("■ STOP")
+        # 恢复主窗口
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
 
     def _get_wait_for(self, physical, which):
         row = next((s for s in self.mapping if s.get('physical', '').lower() == physical.lower()), None)
