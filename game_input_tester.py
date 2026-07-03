@@ -13,6 +13,7 @@ import os
 import queue
 import random
 import re
+import sys
 import threading
 import time
 import tkinter as tk
