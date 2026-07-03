@@ -83,10 +83,18 @@ def send_scan_code(scan: int):
     flags = KEYEVENTF_SCANCODE
     if scan >= 0xE000:
         flags |= KEYEVENTF_EXTENDEDKEY
+    # time=0 让 Windows 识别为"注入输入"，绕过部分 Focus stealing 检查
     ki_down = KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=None)
     ki_up   = KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags | KEYEVENTF_KEYUP, time=0, dwExtraInfo=None)
     user32.SendInput(1, ctypes.byref(INPUT(type=1, u=INPUT_UNION(ki=ki_down))), ctypes.sizeof(INPUT))
     user32.SendInput(1, ctypes.byref(INPUT(type=1, u=INPUT_UNION(ki=ki_up))),   ctypes.sizeof(INPUT))
+    # 检查 GetLastError
+    err = ctypes.get_last_error()
+    if err and err != 0:
+        ctypes.set_last_error(0)
+        # 5 = ERROR_ACCESS_DENIED（Focus stealing prevention）
+        return False
+    return True
 
 def send_key(name: str):
     """根据键名发送（小写）。"""
