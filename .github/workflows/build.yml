@@ -25,11 +25,11 @@ jobs:
       with:
         python-version: '3.11'
     - name: Smoke import
-      run: python -c "import ast; ast.parse(open('game_input_tester.py').read()); print('OK')"
+      run: python -c "import ast; ast.parse(open('game_input_tester.py', encoding='utf-8').read()); print('OK')"
     - name: Verify key APIs
       run: |
         python -c "
-        src = open('game_input_tester.py').read()
+        src = open('game_input_tester.py', encoding='utf-8').read()
         for api in ['SCANCODE', 'send_scan_code', 'CooldownPlayer', 'ScriptPlayer',
                     'register_hotkeys', 'Recorder', 'MappingDialog', 'EditConfigDialog',
                     'execute_min', 'execute_max', 'round_timeout_sec', '_weighted_pick',
