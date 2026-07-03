@@ -133,8 +133,34 @@ def register_hotkeys(callbacks: dict, stop_event: threading.Event):
     user32.DestroyWindow(hwnd)
 
 # ===== 录制（WH_KEYBOARD_LL 钩子） =====
+# VK code → 我们的物理键名（跟 SCANCODE 的 key 对齐）
+VK_TO_NAME = {
+    # 字母
+    **{i: chr(i).lower() for i in range(ord('A'), ord('Z') + 1)},
+    # 数字
+    **{i: chr(i - ord('0') + ord('0')) for i in range(0x30, 0x3A)},  # VK_0..VK_9
+    # 功能键
+    **{0x70 + i: f'f{i+1}' for i in range(12)},  # VK_F1..F12
+    # 方向 / 编辑
+    0x25: 'left', 0x26: 'up', 0x27: 'right', 0x28: 'down',
+    0x24: 'home', 0x23: 'end', 0x2D: 'insert', 0x2E: 'delete',
+    0x21: 'pageup', 0x22: 'pagedown',
+    # 基础
+    0x20: 'space', 0x0D: 'enter', 0x1B: 'escape', 0x09: 'tab', 0x08: 'back',
+    # 修饰
+    0xA0: 'shift', 0xA1: 'rshift', 0xA2: 'ctrl', 0xA3: 'rctrl',
+    0xA4: 'alt', 0xA5: 'ralt',
+    0x14: 'caps', 0x90: 'num', 0x91: 'scroll',
+    # 小键盘
+    **{0x60 + i: f'numpad{i}' for i in range(10)},
+    0x6A: 'multiply', 0x6B: 'add', 0x6D: 'subtract', 0x6E: 'decimal', 0x6F: 'divide',
+    # 符号（VK 不与 ASCII 重叠时单独映射）
+    0xC0: '`', 0xBD: '-', 0xBB: '=', 0xDB: '[', 0xDD: ']', 0xDC: '\\',
+    0xBA: ';', 0xDE: "'", 0xBC: ',', 0xBE: '.', 0xBF: '/',
+}
+
 class Recorder:
-    """WH_KEYBOARD_LL 低层键盘钩子，事件通过 queue 传出。"""
+    """WH_KEYBOARD_LL 低层键盘钩子，事件直接回调。"""
     WH_KEYBOARD_LL = 13
     HC_ACTION = 0
     LLKHF_UP = 0x80
@@ -153,15 +179,15 @@ class Recorder:
         self._hook_id = None
         self._thread = None
         self._hwnd = None
-        self._wndproc_ref = None  # 防止 GC
+        self._wndproc_ref = None
+        self._hook_proc_ref = None
         self._stop = threading.Event()
         self._start_ms = 0
-        self._watch_keys = set()  # 白名单（空 = 不限制）
-        self._logical_name_of = lambda k: PHYSICAL_NAMES.get(SCANCODE.get(k.lower(), 0), k)
+        self._watch_keys = set()  # 空 = 录所有
+        self._logical_name_of = lambda k: k
 
     def set_filter(self, watch_keys: set, logical_name_of):
-        """设置白名单和反查函数。watch_keys 为空表示录所有键。"""
-        self._watch_keys = watch_keys
+        self._watch_keys = set(watch_keys) if watch_keys else set()
         if logical_name_of:
             self._logical_name_of = logical_name_of
 
@@ -175,63 +201,101 @@ class Recorder:
 
     def stop(self):
         self._stop.set()
-        # 发个 WM_QUIT 让 GetMessage 返回 0
+        # 发 WM_QUIT 让 GetMessage 返回 0
         if self._hwnd:
-            user32.PostMessageW(self._hwnd, 0x0012, 0, 0)  # WM_QUIT
+            try:
+                user32.PostMessageW(self._hwnd, 0x0012, 0, 0)  # WM_QUIT
+            except Exception:
+                pass
         if self._thread:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
         self._thread = None
         if self._hook_id:
-            user32.UnhookWindowsHookEx(self._hook_id)
+            try:
+                user32.UnhookWindowsHookEx(self._hook_id)
+            except Exception:
+                pass
             self._hook_id = None
         if self._hwnd:
-            user32.DestroyWindow(self._hwnd)
+            try:
+                user32.DestroyWindow(self._hwnd)
+            except Exception:
+                pass
             self._hwnd = None
-            user32.UnregisterClassW("GameInputTesterRecClass", kernel32.GetModuleHandleW(None))
+            try:
+                user32.UnregisterClassW("GameInputTesterRecClass", kernel32.GetModuleHandleW(None))
+            except Exception:
+                pass
 
     def _run(self):
-        """钩子线程：注册窗口类 → 创建隐藏窗口 → 安装钩子 → 消息循环。"""
-        @ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int)
+        """钩子线程：建消息泵窗口 → 装钩子 → 事件直接回调。"""
+        HOOKPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_long,            # 返回值
+            ctypes.c_int,             # nCode
+            ctypes.c_uint,            # wParam
+            ctypes.c_int              # lParam
+        )
+        WNDPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_long,
+            ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int
+        )
+
+        # 钩子回调：直接在钩子线程调 on_event（on_event 内部要线程安全）
+        def hook_proc(nCode, wParam, lParam):
+            if nCode == self.HC_ACTION and not self._stop.is_set():
+                try:
+                    info = ctypes.cast(lParam, ctypes.POINTER(self.KBDLLHOOKSTRUCT))[0]
+                    vk = info.vkCode
+                    key_name = VK_TO_NAME.get(vk, f'vk{vk:02x}')
+                    if not self._watch_keys or key_name in self._watch_keys:
+                        is_down = (info.flags & self.LLKHF_UP) == 0
+                        try:
+                            logical = self._logical_name_of(key_name) or key_name
+                            self._on_event(logical, key_name, is_down,
+                                           int(time.time() * 1000) - self._start_ms)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            return user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
+
+        # 空 WndProc：让消息循环能跑（PeekMessage 派发）
         def wndproc(hwnd, msg, wparam, lparam):
-            if msg == self.HC_ACTION and lparam:
-                info = ctypes.cast(lparam, ctypes.POINTER(self.KBDLLHOOKSTRUCT))[0]
-                vk = info.vkCode
-                key_name = chr(vk).lower() if 0x30 <= vk <= 0x5A else f"vk{vk:02x}"
-                if not self._watch_keys or key_name in self._watch_keys:
-                    is_down = (info.flags & self.LLKHF_UP) == 0
-                    try:
-                        self._on_event(self._logical_name_of(key_name), key_name, is_down, int(time.time() * 1000) - self._start_ms)
-                    except Exception:
-                        pass
-            elif msg == 0x0012:  # WM_QUIT
+            if msg == 0x0012:  # WM_QUIT
                 pass
             return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
+        self._hook_proc_ref = HOOKPROC(hook_proc)
+        self._wndproc_ref = WNDPROC(wndproc)
+
+        # 装窗口（消息泵用）
         wc = user32.WNDCLASSW()
-        wc.lpfnWndProc = wndproc
+        wc.lpfnWndProc = self._wndproc_ref
         wc.hInstance = kernel32.GetModuleHandleW(None)
         wc.lpszClassName = "GameInputTesterRecClass"
         user32.RegisterClassW(ctypes.byref(wc))
-        self._wndproc_ref = wndproc  # 防 GC
-        self._hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "", 0, 0, 0, 0, 0, None, None, wc.hInstance, None)
+        self._hwnd = user32.CreateWindowExW(
+            0, wc.lpszClassName, "", 0,
+            0, 0, 0, 0, None, None, wc.hInstance, None
+        )
+        if not self._hwnd:
+            self._stop.set()
+            return
 
-        CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int)
-        @CMPFUNC
-        def hook_proc(nCode, wParam, lParam):
-            if nCode == self.HC_ACTION:
-                # 让 wndproc 收到事件
-                user32.PostMessageW(self._hwnd, self.HC_ACTION, wParam, lParam)
-            return user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
-
-        self._hook_id = user32.SetWindowsHookExW(self.WH_KEYBOARD_LL, hook_proc, kernel32.GetModuleHandleW(None), 0)
+        # 装钩子
+        self._hook_id = user32.SetWindowsHookExW(
+            self.WH_KEYBOARD_LL, self._hook_proc_ref,
+            kernel32.GetModuleHandleW(None), 0
+        )
         if not self._hook_id:
             self._stop.set()
             return
 
+        # 消息循环（PeekMessage 非阻塞，配合 stop_event）
         msg = ctypes.wintypes.MSG()
         while not self._stop.is_set():
             ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret <= 0:
+            if ret <= 0:  # 0 = WM_QUIT, -1 = error
                 break
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
@@ -691,7 +755,8 @@ class App:
         self.execute_max = 6
         self.round_timeout_sec = 0
         self.active_config = None
-        self._buffer = []  # 录制缓冲 [(logical, physical, is_down, ts_ms), ...]
+        self._buffer = []  # 录制缓冲 [(logical, physical), ...]
+        self._buffer_lock = threading.Lock()
         self._player = None
         self._player_thread = None
         self._recorder = Recorder(on_event=self._on_recorded)
@@ -854,25 +919,27 @@ class App:
                             if s.get('physical', '').lower() == k.lower()), k))
 
     def _on_recorded(self, logical, physical, is_down, ts_ms):
-        # 钩子线程 → 通过 log 走 UI 线程
+        # 钩子线程 → 通过 log 走 UI 线程；_buffer 加锁
         evt_str = "Down" if is_down else "Up"
-        if is_down:  # 只记录 Down 事件
-            self._buffer.append((logical, physical))
-            self.log(f"[{ts_ms:6}ms] {logical} {evt_str}")
-        else:
-            self.log(f"[{ts_ms:6}ms] {logical} {evt_str}")
+        if is_down:
+            with self._buffer_lock:
+                self._buffer.append((logical, physical))
+        self.log(f"[{ts_ms:6}ms] {logical} {evt_str}")
 
     # ===== 录制 / 回放 =====
     def toggle_record(self):
         if self._recorder._thread is not None:
             self._recorder.stop()
-            self.log(f"■ REC done ({len(self._buffer)} down events)")
+            with self._buffer_lock:
+                n = len(self._buffer)
+            self.log(f"■ REC done ({n} down events)")
             self._update_status_bar()
         else:
             if not self.mapping:
                 self.log("⚠ 先在映射里加键")
                 return
-            self._buffer.clear()
+            with self._buffer_lock:
+                self._buffer.clear()
             self._update_recorder_filter()
             self._recorder.start()
             self.log("● REC start")
@@ -903,10 +970,12 @@ class App:
                      f"执行{self.execute_min}~{self.execute_max}次/轮 | 超时={tmo}")
         else:
             # 脚本回放
+            with self._buffer_lock:
+                buffer_snapshot = list(self._buffer)
             steps = [(b[0], b[1],
                       self._get_wait_for(b[1], 'min'),
                       self._get_wait_for(b[1], 'max'))
-                     for b in self._buffer]
+                     for b in buffer_snapshot]
             if not steps:
                 self.log("⚠ 没有可回放的动作（先录制）")
                 return
@@ -1068,7 +1137,9 @@ class App:
             return
         try:
             steps = []
-            for logical, physical in [(b[0], b[1]) for b in self._buffer]:
+            with self._buffer_lock:
+                buffer_snapshot = list(self._buffer)
+            for logical, physical in buffer_snapshot:
                 row = next((s for s in self.mapping if s.get('physical', '').lower() == physical.lower()), None)
                 cd = int(row.get('cooldown_ms', 1000)) if row else 1000
                 jt = int(row.get('jitter_ms', 0)) if row else 0
