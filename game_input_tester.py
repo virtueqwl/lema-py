@@ -236,18 +236,54 @@ class Recorder:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
-# ===== 冷却回放 =====
+# ===== 冷却回放（分组模式） =====
 class CooldownPlayer:
-    def __init__(self, slots, rounds=1, reset_per_round=False, on_progress=None):
+    """
+    分组冷却回放：
+    - execute 区：每轮随机出现 N~M 次（受 cooldown 限制）
+    - move / buff 区：每轮各只出现 1 次（按权重抽）
+    - 整轮有超时（round_timeout_sec，0=不限）
+    """
+    GROUPS = ('execute', 'move', 'buff')
+
+    def __init__(self, slots, rounds=1, reset_per_round=False,
+                 execute_min=3, execute_max=6, round_timeout_sec=0,
+                 on_progress=None):
         self.slots = slots
         self.rounds = rounds
         self.reset_per_round = reset_per_round
+        self.execute_min = max(1, int(execute_min))
+        self.execute_max = max(self.execute_min, int(execute_max))
+        self.round_timeout_sec = max(0, int(round_timeout_sec))
         self.on_progress = on_progress
         self.cancel = threading.Event()
+
+    def _group_of(self, s):
+        g = s.get('group', 'execute')
+        return g if g in self.GROUPS else 'execute'
+
+    def _weighted_pick(self, pool, rng):
+        """按 weight 字段加权随机抽一个（不是简单随机）。"""
+        if not pool:
+            return None
+        total = sum(max(0, int(s.get('weight', 1))) for s in pool)
+        if total <= 0:
+            return rng.choice(pool)
+        r = rng.uniform(0, total)
+        acc = 0
+        for s in pool:
+            acc += max(0, int(s.get('weight', 1)))
+            if r <= acc:
+                return s
+        return pool[-1]
 
     def run(self):
         rng = random.Random()
         last_trigger = {s['physical']: 0 for s in self.slots}
+
+        # 按 group 分桶
+        buckets = {g: [s for s in self.slots if self._group_of(s) == g and int(s.get('weight', 1)) > 0]
+                   for g in self.GROUPS}
 
         round_n = 0
         while (self.rounds == 0 or round_n < self.rounds) and not self.cancel.is_set():
@@ -255,36 +291,111 @@ class CooldownPlayer:
             if self.reset_per_round:
                 last_trigger = {s['physical']: 0 for s in self.slots}
 
-            pool = []
-            for s in self.slots:
-                w = max(0, int(s.get('weight', 1)))
-                pool.extend([s] * w)
-            rng.shuffle(pool)
+            # 本轮已用的"一次性"键（move/buff 标记用过的）
+            used_once = set()
+            # 本轮执行区目标次数
+            target_execute = rng.randint(self.execute_min, self.execute_max)
+            executed = 0
+            round_start = time.time()
 
-            for s in pool:
-                if self.cancel.is_set():
-                    return
-                physical = s['physical']
-                cd = int(s.get('cooldown_ms', 1000))
-                jitter = rng.randint(0, int(s.get('jitter_ms', 0)) + 1)
-                wait_ms = cd + jitter
-                ready = last_trigger[physical] + wait_ms
+            self.on_progress and self.on_progress(
+                f"轮 {round_n} 开始 | execute={target_execute} 移动={len(buckets['move'])} buff={len(buckets['buff'])}"
+            )
+
+            while not self.cancel.is_set():
                 now = int(time.time() * 1000)
-                delay = ready - now
+
+                # 整轮超时检查
+                if self.round_timeout_sec > 0:
+                    elapsed = time.time() - round_start
+                    if elapsed >= self.round_timeout_sec:
+                        self.on_progress and self.on_progress(
+                            f"轮 {round_n} 超时 ({elapsed:.1f}s)，跳过"
+                        )
+                        break
+
+                # 检查退出条件：execute 达到目标 + move/buff 全用完
+                move_done = (not buckets['move']) or all(s['physical'] in used_once for s in buckets['move'])
+                buff_done = (not buckets['buff']) or all(s['physical'] in used_once for s in buckets['buff'])
+                execute_done = executed >= target_execute
+                if execute_done and move_done and buff_done:
+                    self.on_progress and self.on_progress(
+                        f"轮 {round_n} 完成 | 执行 {executed} 次"
+                    )
+                    break
+
+                # 计算每个桶的"就绪"集合
+                def ready_in(bucket):
+                    return [s for s in bucket if now >= last_trigger[s['physical']] + self._cd_of(s, rng)]
+
+                ready_execute = ready_in(buckets['execute'])
+                # move/buff：去掉本轮已用的
+                ready_move = [s for s in buckets['move'] if s['physical'] not in used_once and now >= last_trigger[s['physical']] + self._cd_of(s, rng)]
+                ready_buff = [s for s in buckets['buff'] if s['physical'] not in used_once and now >= last_trigger[s['physical']] + self._cd_of(s, rng)]
+
+                # 如果 execute 还没达到目标次数，execute 加权更高（×2 占比）
+                if not execute_done:
+                    candidates = ready_execute + ready_execute + ready_move + ready_buff
+                else:
+                    candidates = ready_move + ready_buff
+
+                if not candidates:
+                    # 等到任意一个就绪（取最近的就绪时间）
+                    next_ready = []
+                    for s in self.slots:
+                        if s['physical'] in used_once and self._group_of(s) in ('move', 'buff'):
+                            continue
+                        ready_at = last_trigger[s['physical']] + self._cd_of(s, rng)
+                        if ready_at > now:
+                            next_ready.append(ready_at)
+                    if not next_ready:
+                        # 所有都就绪了（不会进 else，留兜底）
+                        continue
+                    delay = min(next_ready) - now
+                    if self.cancel.wait(delay / 1000.0):
+                        return
+                    continue
+
+                pick = self._weighted_pick(candidates, rng)
+                if pick is None:
+                    continue
+
+                # 等到该键就绪（保险，理论上已经是就绪的）
+                ready_at = last_trigger[pick['physical']] + self._cd_of(self._coerce_dict(pick), rng)
+                delay = ready_at - int(time.time() * 1000)
                 if delay > 0:
                     if self.cancel.wait(delay / 1000.0):
                         return
-                send_key(physical)
-                last_trigger[physical] = int(time.time() * 1000)
-                if self.on_progress:
-                    self.on_progress(f"轮 {round_n} | {s['logical']} ({physical}) | cd={wait_ms}ms")
 
-                lo = min(int(s.get('after_min_ms', 0)), int(s.get('after_max_ms', 0)))
-                hi = max(int(s.get('after_min_ms', 0)), int(s.get('after_max_ms', 0)))
+                # 发键
+                send_key(pick['physical'])
+                last_trigger[pick['physical']] = int(time.time() * 1000)
+                group = self._group_of(pick)
+                if group == 'execute':
+                    executed += 1
+                else:
+                    used_once.add(pick['physical'])
+
+                self.on_progress and self.on_progress(
+                    f"轮 {round_n} | [{group}] {pick['logical']} ({pick['physical']}) | {executed}/{target_execute}"
+                )
+
+                # 触发后等待
+                lo = min(int(pick.get('after_min_ms', 0)), int(pick.get('after_max_ms', 0)))
+                hi = max(int(pick.get('after_min_ms', 0)), int(pick.get('after_max_ms', 0)))
                 if hi > 0:
                     after = lo if lo == hi else rng.randint(lo, hi)
                     if self.cancel.wait(after / 1000.0):
                         return
+
+    def _cd_of(self, s, rng):
+        cd = int(s.get('cooldown_ms', 1000))
+        jitter = rng.randint(0, int(s.get('jitter_ms', 0)) + 1)
+        return cd + jitter
+
+    def _coerce_dict(self, s):
+        # candidates 列表里可能有重复引用（加权展开），已经是 dict 了
+        return s
 
 # ===== 脚本回放（按录制顺序） =====
 class ScriptPlayer:
@@ -314,8 +425,8 @@ class ScriptPlayer:
 
 # ===== Tkinter UI =====
 class MappingDialog(tk.Toplevel):
-    """键位映射编辑对话框（7 列 Treeview）。"""
-    COLUMNS = ['Logical', 'Physical', 'CooldownMs', 'JitterMs', 'AfterMinMs', 'AfterMaxMs', 'Weight']
+    """键位映射编辑对话框（8 列 Treeview，含 Group）。"""
+    COLUMNS = ['Logical', 'Physical', 'Group', 'CooldownMs', 'JitterMs', 'AfterMinMs', 'AfterMaxMs', 'Weight']
 
     def __init__(self, parent, mapping_data, on_save):
         super().__init__(parent)
@@ -340,12 +451,14 @@ class MappingDialog(tk.Toplevel):
         self.tree = ttk.Treeview(frame, columns=self.COLUMNS, show='headings', height=15)
         for col in self.COLUMNS:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=130, anchor='w')
-        # Physical 列改成下拉
+            self.tree.column(col, width=110, anchor='w')
         self.tree.heading('Physical', text='Physical（US 104 键）')
+        self.tree.heading('Group', text='Group（分组）')
+        # Physical / Group 列下拉
         self.phys_combo_values = AVAILABLE_KEYS
-        for col, w in [('Logical', 100), ('Physical', 160), ('CooldownMs', 100), ('JitterMs', 90),
-                       ('AfterMinMs', 110), ('AfterMaxMs', 110), ('Weight', 80)]:
+        self.group_combo_values = ['execute', 'move', 'buff']
+        for col, w in [('Logical', 100), ('Physical', 160), ('Group', 90), ('CooldownMs', 90), ('JitterMs', 80),
+                       ('AfterMinMs', 100), ('AfterMaxMs', 100), ('Weight', 70)]:
             self.tree.column(col, width=w)
 
         vsb = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
@@ -355,7 +468,7 @@ class MappingDialog(tk.Toplevel):
 
         # 加载数据
         for row in mapping_data:
-            self.tree.insert('', 'end', values=[row.get(c.lower(), '') for c in self.COLUMNS])
+            self.tree.insert('', 'end', values=[row.get(c.lower(), '') if c.lower() != 'group' else row.get('group', 'execute') for c in self.COLUMNS])
 
         # 编辑控件（点击单元格时弹出下拉框）
         self.tree.bind('<Double-1>', self._on_double_click)
@@ -390,6 +503,15 @@ class MappingDialog(tk.Toplevel):
             self._edit_combo.focus_set()
             self._edit_combo.bind('<<ComboboxSelected>>', lambda e: self._commit_edit(item, col_name, self._edit_combo.get()))
             self._edit_combo.bind('<FocusOut>', lambda e: self._destroy_edit())
+        elif col_name == 'Group':
+            # 下拉
+            cur = str(current) if current in self.group_combo_values else 'execute'
+            self._edit_combo = ttk.Combobox(self.tree, values=self.group_combo_values, state='readonly')
+            self._edit_combo.set(cur)
+            self._edit_combo.place(x=x, y=y, width=w, height=h)
+            self._edit_combo.focus_set()
+            self._edit_combo.bind('<<ComboboxSelected>>', lambda e: self._commit_edit(item, col_name, self._edit_combo.get()))
+            self._edit_combo.bind('<FocusOut>', lambda e: self._destroy_edit())
         else:
             # 文本框
             self._edit_entry = ttk.Entry(self.tree)
@@ -412,7 +534,7 @@ class MappingDialog(tk.Toplevel):
             self._edit_combo = None
 
     def _add_row(self):
-        self.tree.insert('', 'end', values=['', 'a', 1000, 0, 0, 0, 1])
+        self.tree.insert('', 'end', values=['', 'a', 'execute', 1000, 0, 0, 0, 1])
 
     def _del_row(self):
         for item in self.tree.selection():
@@ -429,6 +551,8 @@ class MappingDialog(tk.Toplevel):
                 row['after_min_ms'] = int(row.get('afterminms', 0) or 0)
                 row['after_max_ms'] = int(row.get('aftermaxms', 0) or 0)
                 row['weight'] = int(row.get('weight', 1) or 1)
+                grp = str(row.get('group', 'execute') or 'execute')
+                row['group'] = grp if grp in CooldownPlayer.GROUPS else 'execute'
             except (TypeError, ValueError) as e:
                 messagebox.showerror("错误", f"数值列必须是整数: {e}", parent=self)
                 return
@@ -562,6 +686,10 @@ class App:
         self.configs_dir.mkdir(exist_ok=True)
         self.last_config_file = Path(__file__).parent / "last_config.txt"
         self.mapping = self.load_default()
+        # 全局配置：执行区每轮次数区间 + 整轮超时
+        self.execute_min = 3
+        self.execute_max = 6
+        self.round_timeout_sec = 0
         self.active_config = None
         self._buffer = []  # 录制缓冲 [(logical, physical, is_down, ts_ms), ...]
         self._player = None
@@ -605,6 +733,22 @@ class App:
         self.reset_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="每轮重置冷却（独立测试）", variable=self.reset_var,
                         command=self._update_status_bar).pack(side='left')
+
+        sep3 = ttk.Separator(top, orient='vertical'); sep3.pack(side='left', fill='y', padx=8)
+        ttk.Label(top, text="执行区每轮:").pack(side='left')
+        self.exec_min_var = tk.IntVar(value=3)
+        ttk.Spinbox(top, from_=1, to=99, textvariable=self.exec_min_var, width=4,
+                    command=self._update_status_bar).pack(side='left')
+        ttk.Label(top, text="~").pack(side='left')
+        self.exec_max_var = tk.IntVar(value=6)
+        ttk.Spinbox(top, from_=1, to=99, textvariable=self.exec_max_var, width=4,
+                    command=self._update_status_bar).pack(side='left')
+
+        sep4 = ttk.Separator(top, orient='vertical'); sep4.pack(side='left', fill='y', padx=8)
+        ttk.Label(top, text="轮超时(s):").pack(side='left')
+        self.timeout_var = tk.IntVar(value=0)
+        ttk.Spinbox(top, from_=0, to=9999, textvariable=self.timeout_var, width=5,
+                    command=self._update_status_bar).pack(side='left')
 
         # 主体：SplitContainer
         main = ttk.PanedWindow(self.root, orient='horizontal')
@@ -687,10 +831,18 @@ class App:
         rounds = self.rounds_var.get()
         rounds_str = "∞" if rounds == 0 else str(rounds)
         reset_str = "每轮重置" if self.reset_var.get() else "跨轮累计"
+        # 统计各 group 数量
+        groups = {'execute': 0, 'move': 0, 'buff': 0}
+        for s in self.mapping:
+            g = s.get('group', 'execute')
+            if g in groups:
+                groups[g] += 1
         active = self.active_config or "(未命名)"
+        tmo = f"超时={self.timeout_var.get()}s" if self.timeout_var.get() > 0 else "无超时"
         self.status_var.set(
-            f"当前: {active} | 模式: {mode} | {len(self.mapping)} 键 | "
-            f"{rounds_str} 轮 | 冷却: {reset_str}"
+            f"当前: {active} | 模式: {mode} | 总{len(self.mapping)}键 "
+            f"(执行{groups['execute']}/移动{groups['move']}/BUFF{groups['buff']}) | "
+            f"{rounds_str} 轮 | {reset_str} | 执行{self.exec_min_var.get()}~{self.exec_max_var.get()}次/轮 | {tmo}"
         )
 
     def _update_recorder_filter(self):
@@ -733,13 +885,22 @@ class App:
         # 启动前等旧 task
         rounds = self.rounds_var.get()
         if self.mode_combo.current() == 0:
-            # 冷却随机
+            # 冷却随机（分组模式）
             if not self.mapping:
                 self.log("⚠ 配置为空")
                 return
-            self._player = CooldownPlayer(self.mapping, rounds, self.reset_var.get(), on_progress=self.log)
+            self.execute_min = self.exec_min_var.get()
+            self.execute_max = max(self.execute_min, self.exec_max_var.get())
+            self.round_timeout_sec = self.timeout_var.get()
+            self._player = CooldownPlayer(
+                self.mapping, rounds, self.reset_var.get(),
+                execute_min=self.execute_min, execute_max=self.execute_max,
+                round_timeout_sec=self.round_timeout_sec,
+                on_progress=self.log)
             mode = "每轮重置" if self.reset_var.get() else "跨轮累计"
-            self.log(f"▶ COOLDOWN | {len(self.mapping)} 键 | {'∞' if rounds == 0 else rounds} 轮 | {mode}")
+            tmo = f"{self.round_timeout_sec}s" if self.round_timeout_sec > 0 else "无"
+            self.log(f"▶ COOLDOWN | {len(self.mapping)} 键 | {'∞' if rounds == 0 else rounds} 轮 | {mode} | "
+                     f"执行{self.execute_min}~{self.execute_max}次/轮 | 超时={tmo}")
         else:
             # 脚本回放
             steps = [(b[0], b[1],

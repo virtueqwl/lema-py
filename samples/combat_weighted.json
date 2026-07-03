@@ -1,7 +1,17 @@
 [
-  {"logical": "Basic",  "physical": "q",     "cooldown_ms": 3000,  "jitter_ms": 300,  "after_min_ms": 800,  "after_max_ms": 1500, "weight": 5},
-  {"logical": "Skill1", "physical": "w",     "cooldown_ms": 5000,  "jitter_ms": 500,  "after_min_ms": 1000, "after_max_ms": 2000, "weight": 3},
-  {"logical": "Skill2", "physical": "e",     "cooldown_ms": 8000,  "jitter_ms": 1000, "after_min_ms": 1200, "after_max_ms": 2000, "weight": 2},
-  {"logical": "Ult",    "physical": "r",     "cooldown_ms": 15000, "jitter_ms": 1500, "after_min_ms": 1000, "after_max_ms": 1800, "weight": 1},
-  {"logical": "Dodge",  "physical": "space", "cooldown_ms": 1000,  "jitter_ms": 200,  "after_min_ms": 500,  "after_max_ms": 1000, "weight": 4}
+  {"logical": "Q按键",    "physical": "q",     "group": "execute", "cooldown_ms": 3000,  "jitter_ms": 300,  "after_min_ms": 800,  "after_max_ms": 1500, "weight": 5},
+  {"logical": "W按键",    "physical": "w",     "group": "execute", "cooldown_ms": 5000,  "jitter_ms": 500,  "after_min_ms": 1000, "after_max_ms": 2000, "weight": 3},
+  {"logical": "E按键",    "physical": "e",     "group": "execute", "cooldown_ms": 8000,  "jitter_ms": 1000, "after_min_ms": 1200, "after_max_ms": 2000, "weight": 2},
+  {"logical": "R按键",    "physical": "r",     "group": "execute", "cooldown_ms": 15000, "jitter_ms": 1500, "after_min_ms": 1000, "after_max_ms": 1800, "weight": 1},
+  {"logical": "空格",     "physical": "space", "group": "execute", "cooldown_ms": 1000,  "jitter_ms": 200,  "after_min_ms": 500,  "after_max_ms": 1000, "weight": 4},
+
+  {"logical": "上",       "physical": "up",    "group": "move",    "cooldown_ms": 1500, "jitter_ms": 0,    "after_min_ms": 400,  "after_max_ms": 600, "weight": 1},
+  {"logical": "下",       "physical": "down",  "group": "move",    "cooldown_ms": 1500, "jitter_ms": 0,    "after_min_ms": 400,  "after_max_ms": 600, "weight": 1},
+  {"logical": "左",       "physical": "left",  "group": "move",    "cooldown_ms": 1500, "jitter_ms": 0,    "after_min_ms": 400,  "after_max_ms": 600, "weight": 1},
+  {"logical": "右",       "physical": "right", "group": "move",    "cooldown_ms": 1500, "jitter_ms": 0,    "after_min_ms": 400,  "after_max_ms": 600, "weight": 1},
+
+  {"logical": "BUFF1",    "physical": "1",     "group": "buff",    "cooldown_ms": 30000, "jitter_ms": 0,    "after_min_ms": 500,  "after_max_ms": 800, "weight": 1},
+  {"logical": "BUFF2",    "physical": "2",     "group": "buff",    "cooldown_ms": 30000, "jitter_ms": 0,    "after_min_ms": 500,  "after_max_ms": 800, "weight": 1},
+  {"logical": "BUFF3",    "physical": "3",     "group": "buff",    "cooldown_ms": 30000, "jitter_ms": 0,    "after_min_ms": 500,  "after_max_ms": 800, "weight": 1},
+  {"logical": "BUFF4",    "physical": "4",     "group": "buff",    "cooldown_ms": 60000, "jitter_ms": 0,    "after_min_ms": 500,  "after_max_ms": 800, "weight": 1}
 ]

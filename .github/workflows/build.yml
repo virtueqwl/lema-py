@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-syntax:
+  syntax-check:
     name: Syntax check
     runs-on: ubuntu-latest
     steps:
@@ -16,7 +16,7 @@ jobs:
       run: python3 -m py_compile game_input_tester.py
 
   smoke-test:
-    name: Smoke test (Windows)
+    name: Smoke test
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
@@ -26,16 +26,47 @@ jobs:
         python-version: '3.11'
     - name: Smoke import
       run: python -c "import ast; ast.parse(open('game_input_tester.py').read()); print('OK')"
-    - name: Verify SCANCODE coverage
+    - name: Verify key APIs
       run: |
         python -c "
-        import ast
-        tree = ast.parse(open('game_input_tester.py').read())
-        # 简单 sanity check: 文件包含 SCANCODE 字典
         src = open('game_input_tester.py').read()
-        assert 'SCANCODE' in src
-        assert 'send_scan_code' in src
-        assert 'CooldownPlayer' in src
-        assert 'register_hotkeys' in src
+        for api in ['SCANCODE', 'send_scan_code', 'CooldownPlayer', 'ScriptPlayer',
+                    'register_hotkeys', 'Recorder', 'MappingDialog', 'EditConfigDialog',
+                    'execute_min', 'execute_max', 'round_timeout_sec', '_weighted_pick',
+                    'class App']:
+            assert api in src, f'Missing: {api}'
         print('All key APIs present')
         "
+
+  build-exe:
+    name: Build EXE (PyInstaller)
+    runs-on: windows-latest
+    needs: smoke-test
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install PyInstaller
+      run: pip install pyinstaller
+
+    - name: Build single-file EXE
+      run: |
+        pyinstaller --onefile --windowed --name GameInputTester ^
+          --add-data "samples;samples" ^
+          --collect-all tkinter ^
+          game_input_tester.py
+
+    - name: List build output
+      run: dir dist
+
+    - name: Upload EXE artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: GameInputTester-win-x64
+        path: dist/GameInputTester.exe
+        if-no-files-found: error
+        retention-days: 30
