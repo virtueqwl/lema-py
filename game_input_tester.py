@@ -132,6 +132,16 @@ def register_hotkeys(callbacks: dict, stop_event: threading.Event):
         user32.UnregisterHotKey(hwnd, hid)
     user32.DestroyWindow(hwnd)
 
+# ===== 应用根目录 =====
+# 开发期：脚本所在目录
+# 打包后（PyInstaller --onefile）：exe 所在目录
+def _app_dir() -> Path:
+    """返回 exe / 脚本所在的目录（用于 configs/、settings.json 等运行时数据）。"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包：sys.executable 是 exe 路径
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
 # ===== 录制（WH_KEYBOARD_LL 钩子） =====
 # VK code → 我们的物理键名（跟 SCANCODE 的 key 对齐）
 VK_TO_NAME = {
@@ -746,9 +756,9 @@ class App:
         self.root.title("GameInputTester (Python)")
         self.root.geometry("1080x640")
 
-        self.configs_dir = Path(__file__).parent / "configs"
+        self.configs_dir = _app_dir() / "configs"
         self.configs_dir.mkdir(exist_ok=True)
-        self.last_config_file = Path(__file__).parent / "last_config.txt"
+        self.last_config_file = _app_dir() / "last_config.txt"
         self.mapping = self.load_default()
         # 全局配置：执行区每轮次数区间 + 整轮超时
         self.execute_min = 3
