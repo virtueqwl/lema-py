@@ -33,7 +33,7 @@ jobs:
         for api in ['SCANCODE', 'send_scan_code', 'CooldownPlayer', 'ScriptPlayer',
                     'register_hotkeys', 'Recorder', 'MappingDialog', 'EditConfigDialog',
                     'execute_min', 'execute_max', 'round_timeout_sec', '_weighted_pick',
-                    'class App']:
+                    'class App', '_app_dir']:
             assert api in src, f'Missing: {api}'
         print('All key APIs present')
         "
@@ -61,13 +61,23 @@ jobs:
         --collect-all tkinter
         game_input_tester.py
 
+    - name: Copy samples to dist/configs
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path dist/configs
+        Copy-Item samples/*.json dist/configs/
+
     - name: List build output
       run: dir dist
 
-    - name: Upload EXE artifact
+    - name: Create distributable zip
+      shell: pwsh
+      run: Compress-Archive -Path dist/* -DestinationPath GameInputTester-win-x64.zip
+
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: GameInputTester-win-x64
-        path: dist/GameInputTester.exe
+        path: GameInputTester-win-x64.zip
         if-no-files-found: error
         retention-days: 30
