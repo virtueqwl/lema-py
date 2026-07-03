@@ -25,7 +25,10 @@ jobs:
       with:
         python-version: '3.11'
     - name: Smoke import
-      run: python -c "import ast; ast.parse(open('game_input_tester.py', encoding='utf-8').read()); print('OK')"
+      run: |
+        python -c "import ast; ast.parse(open('game_input_tester.py', encoding='utf-8').read()); print('syntax OK')"
+        # 实际 import（macOS 没法跑，但 Linux 跑得到 — Windows 才需要真实 Win32）
+        # 在 Windows runner 上这步会因 win32 API 加载失败而崩，预期内；这里只验证语法
     - name: Verify key APIs
       run: |
         python -c "
@@ -33,7 +36,7 @@ jobs:
         for api in ['SCANCODE', 'send_scan_code', 'CooldownPlayer', 'ScriptPlayer',
                     'register_hotkeys', 'Recorder', 'MappingDialog', 'EditConfigDialog',
                     'execute_min', 'execute_max', 'round_timeout_sec', '_weighted_pick',
-                    'class App', '_app_dir']:
+                    'class App', '_app_dir', 'import sys']:
             assert api in src, f'Missing: {api}'
         print('All key APIs present')
         "
