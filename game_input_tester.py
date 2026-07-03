@@ -324,6 +324,14 @@ class Recorder:
             kernel32.GetModuleHandleW(None), 0
         )
         if not self._hook_id:
+            err = ctypes.get_last_error()
+            err_name = {
+                0: 'SUCCESS', 5: 'ACCESS_DENIED', 8: 'NOT_ENOUGH_MEMORY',
+                87: 'INVALID_PARAMETER', 126: 'MODULE_NOT_FOUND',
+                1428: 'HOOK_NEEDS_HMOD', 1429: 'GLOBAL_HOOK_NEEDS_LUID',
+            }.get(err, f'err={err}')
+            print(f"[Recorder] SetWindowsHookExW 失败: {err_name} (err={err})")
+            print(f"[Recorder] 可能原因：反作弊 / 杀毒软件 / 权限不足 / module 句柄错")
             self._stop.set()
             return
 
@@ -821,6 +829,14 @@ class App:
         self._update_recorder_filter()
         # 钩子**启动后就一直跑**（同时承担"录制"和"全局热键"两个职责）
         self._recorder.start()
+        # 钩子状态（写进 stdout，PyInstaller --windowed 时看不到，但开发期有用）
+        time.sleep(0.3)
+        if self._recorder._hook_id:
+            print(f"[GameInputTester] ✓ 钩子已装上 (hwnd={self._recorder._hwnd}, "
+                  f"hook_id={self._recorder._hook_id})")
+        else:
+            print(f"[GameInputTester] ❌ 钩子装失败！F4-F7 热键将不工作")
+            print(f"   可能原因：反作弊 / 杀软 / 权限不足 / 进程 module 句柄错")
 
         self._build_ui()
         self._load_config_list()
