@@ -95,6 +95,31 @@ def send_key(name: str):
         raise ValueError(f"未知键: {name}")
     send_scan_code(code)
 
+# ===== 焦点管理 =====
+def get_foreground_hwnd() -> int:
+    """获取当前前台窗口的 HWND（整数）。"""
+    return user32.GetForegroundWindow()
+
+def get_hwnd_title(hwnd: int) -> str:
+    """获取窗口标题（调试用）。"""
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length == 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+def focus_window(hwnd: int) -> bool:
+    """强制把指定窗口设为前台（用 alt 键 hack 绕过 Windows 限制）。"""
+    if not hwnd:
+        return False
+    # 取消最小化
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    # alt 键 hack：让 SetForegroundWindow 真正生效
+    user32.keybd_event(0x12, 0x38, 0, 0)  # VK_MENU down
+    user32.keybd_event(0x12, 0x38, 2, 0)  # VK_MENU up
+    return bool(user32.SetForegroundWindow(hwnd))
+
 # ===== 全局热键 =====
 HOTKEY_VK = {1: 0x73, 2: 0x74, 3: 0x75, 4: 0x76}  # F4~F7
 
@@ -356,6 +381,12 @@ class CooldownPlayer:
         rng = random.Random()
         last_trigger = {s['physical']: 0 for s in self.slots}
 
+        # 强制恢复焦点：发键前先 setforegroundwindow 到保存的窗口
+        hwnd = getattr(self, '_saved_hwnd', 0)
+        if hwnd:
+            focus_window(hwnd)
+            time.sleep(0.1)
+
         # 按 group 分桶
         buckets = {g: [s for s in self.slots if self._group_of(s) == g and int(s.get('weight', 1)) > 0]
                    for g in self.GROUPS}
@@ -482,6 +513,11 @@ class ScriptPlayer:
 
     def run(self):
         rng = random.Random()
+        # 强制恢复焦点
+        hwnd = getattr(self, '_saved_hwnd', 0)
+        if hwnd:
+            focus_window(hwnd)
+            time.sleep(0.1)
         while not self.cancel.is_set():
             for s in self.steps:
                 if self.cancel.is_set():
@@ -768,6 +804,7 @@ class App:
         self.active_config = None
         self._buffer = []  # 录制缓冲 [(logical, physical), ...]
         self._buffer_lock = threading.Lock()
+        self._saved_hwnd = 0  # 启动回放时记录的前台窗口句柄，回放结束恢复
         self._player = None
         self._player_thread = None
         self._recorder = Recorder(on_event=self._on_recorded)
@@ -960,11 +997,26 @@ class App:
         if self._player_thread and self._player_thread.is_alive():
             self.log("⚠ 已有回放在跑")
             return
-        # 关键：最小化主窗口，让前台窗口（游戏/记事本）拿到焦点
-        # SendInput 只会发给前台窗口 — 不最小化会发给 GameInputTester 自己
-        self.log("💡 主窗口最小化，焦点转回前台窗口...")
-        self.root.iconify()
-        time.sleep(0.2)  # 给 Windows 一点时间转移焦点
+
+        # 关键：保存当前前台窗口的 HWND，强制把焦点转回去
+        # （iconify 不够稳，用 SetForegroundWindow + alt hack 强制转移）
+        self._saved_hwnd = get_foreground_hwnd()
+        if self._saved_hwnd and self._saved_hwnd != int(self.root.winfo_id()):
+            try:
+                title = get_hwnd_title(self._saved_hwnd) or f"HWND={self._saved_hwnd}"
+                self.log(f"💡 记录前台窗口: {title}")
+            except Exception:
+                self.log(f"💡 记录前台窗口 HWND={self._saved_hwnd}")
+        else:
+            self._saved_hwnd = 0
+            self.log("⚠ 未检测到前台窗口（焦点可能在主窗口）")
+        # 主窗口退缩到最小化（不退出，托盘图标可见可恢复）
+        try:
+            self.root.iconify()
+        except Exception:
+            pass
+        time.sleep(0.3)  # 给 Windows 转移焦点的时间
+
         # 启动前等旧 task
         rounds = self.rounds_var.get()
         if self.mode_combo.current() == 0:
